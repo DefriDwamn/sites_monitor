@@ -3,7 +3,7 @@
 #include <format>
 #include <fstream>
 
-std::string make_htt_req(std::string_view host, std::string_view path) {
+std::string make_http_req(std::string_view host, std::string_view path) {
   return std::format("{} {} HTTP/1.1\r\n"
                      "Host: {}\r\n"
                      "User-Agent: HealthChecker\r\n"
