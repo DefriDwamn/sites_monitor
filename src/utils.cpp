@@ -10,7 +10,7 @@ std::string make_http_req(std::string_view host, std::string_view path) {
                      "Accept: */*\r\n"
                      "Connection: close\r\n"
                      "\r\n",
-                     "GET", path, host);
+                     "HEAD", path, host);
 }
 
 std::vector<std::string> parse_sites_file(std::string_view sites_file_path,
