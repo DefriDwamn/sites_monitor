@@ -36,3 +36,16 @@ std::vector<std::string> parse_sites_file(std::string_view sites_file_path,
 
   return sites;
 };
+
+std::string make_log_entry(std::string_view site, std::string_view response) {
+  size_t pos = response.find("\r\n");
+  std::string_view status_line;
+  if (pos != std::string_view::npos) {
+    status_line = response.substr(0, pos);
+  } else {
+    status_line = response;
+  }
+
+  std::string combined = std::string(site) + " " + std::string(status_line);
+  return combined;
+}

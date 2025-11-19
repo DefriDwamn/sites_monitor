@@ -1,3 +1,4 @@
+#include "blockingconcurrentqueue.h"
 #include "boost/asio/awaitable.hpp"
 #include "boost/asio/buffer.hpp"
 #include "boost/asio/detached.hpp"
@@ -10,6 +11,7 @@
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include <chrono>
 #include <exception>
+#include <fstream>
 #include <iostream>
 #include <thread>
 
@@ -24,8 +26,14 @@ using asio::use_awaitable;
 using asio::ip::tcp;
 // using boost::system::error_code;
 
-awaitable<void> health_check(std::string_view site) {
+template <typename Queue>
+awaitable<void> health_check(std::string_view site, Queue &queue,
+                             std::atomic<int> &active_coro) {
   auto ex = co_await this_coro::executor;
+  struct Decrement {
+    std::atomic<int> &ref;
+    ~Decrement() { --ref; }
+  } dec{active_coro};
 
   tcp::resolver resolver(ex);
   tcp::socket socket(ex);
@@ -40,12 +48,13 @@ awaitable<void> health_check(std::string_view site) {
   auto resolver_res = co_await resolver.async_resolve(
       site, "80", tcp::resolver::numeric_service, use_awaitable);
 
-  timer.expires_after(std::chrono::seconds(5));
+  timer.expires_after(std::chrono::seconds(3));
   auto connection_res =
       co_await (asio::async_connect(socket, resolver_res, use_awaitable) ||
                 timer.async_wait(use_awaitable));
   if (connection_res.index() == 1) {
     socket.close();
+    queue.enqueue(make_log_entry(site, "Conection to socket error"));
     co_return;
   }
   timer.cancel();
@@ -60,27 +69,50 @@ awaitable<void> health_check(std::string_view site) {
                 timer.async_wait(use_awaitable));
   if (read_res.index() == 1) {
     socket.close();
+    queue.enqueue(make_log_entry(site, "Read from socket error"));
     co_return;
   };
   timer.cancel();
 
-  std::cout << response << std::endl;
+  queue.enqueue(make_log_entry(site, response));
   socket.close();
 }
+
+template <typename Queue>
+void health_results_writer(Queue &queue, std::atomic<int> &active_coro) {
+  std::ofstream log("results.txt", std::ios::out | std::ios::trunc);
+  if (!log.is_open())
+    throw std::runtime_error("failed to open results file");
+
+  while (true) {
+    std::string res;
+    if (queue.wait_dequeue_timed(res, std::chrono::milliseconds(200))) {
+      log << res << '\n';
+      continue;
+    }
+    if (active_coro == 0 && queue.size_approx() == 0)
+      break;
+  }
+};
 
 int main() {
   try {
     asio::io_context ctx;
     auto sites = parse_sites_file("sites.txt");
 
+    moodycamel::BlockingConcurrentQueue<std::string> queue;
+
+    std::atomic<int> active_coro = sites.size();
     for (const auto &site : sites) {
-      co_spawn(ctx, health_check(site), detached);
+      co_spawn(ctx, health_check(site, queue, active_coro), detached);
     }
 
     std::vector<std::jthread> threads;
     for (auto i = 0; i < std::thread::hardware_concurrency() - 1; ++i) {
       threads.emplace_back([&ctx] { ctx.run(); });
     }
+
+    std::jthread writer([&] { health_results_writer(queue, active_coro); });
 
   } catch (std::exception &e) {
     std::cerr << e.what() << std::endl;
