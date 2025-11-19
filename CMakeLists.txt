@@ -3,6 +3,8 @@ cmake_minimum_required(VERSION 3.31.7)
 project(monitor CXX)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
+set(CONCURRENTQUEUE_DIR
+    ${CMAKE_CURRENT_SOURCE_DIR}/externals/concurrentqueue)
 
 set(BOOST_INCLUDE_LIBRARIES system asio)
 include(FetchContent)
@@ -21,6 +23,7 @@ include_directories(include)
 add_executable(${PROJECT_NAME} "main.cpp" ${SOURCES})
 
 target_link_libraries(${PROJECT_NAME} PRIVATE Boost::system Boost::asio)
+target_include_directories(${PROJECT_NAME} PRIVATE ${CONCURRENTQUEUE_DIR})
 
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32)
