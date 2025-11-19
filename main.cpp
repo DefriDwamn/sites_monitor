@@ -1,15 +1,8 @@
 #include "blockingconcurrentqueue.h"
-#include "boost/asio/awaitable.hpp"
-#include "boost/asio/buffer.hpp"
-#include "boost/asio/detached.hpp"
-#include "boost/asio/io_context.hpp"
-#include "boost/asio/registered_buffer.hpp"
-#include "boost/asio/this_coro.hpp"
-#include "boost/asio/use_awaitable.hpp"
 #include "utils.hpp"
 #include <boost/asio.hpp>
+#include <boost/asio/as_tuple.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
-#include <chrono>
 #include <exception>
 #include <fstream>
 #include <iostream>
@@ -22,9 +15,16 @@ using asio::awaitable;
 using asio::buffer;
 using asio::co_spawn;
 using asio::detached;
-using asio::use_awaitable;
 using asio::ip::tcp;
-// using boost::system::error_code;
+using boost::system::error_code;
+using std::chrono::steady_clock;
+constexpr auto use_nothrow_awaitable = asio::as_tuple(asio::use_awaitable);
+
+awaitable<void> timeout(steady_clock::duration duration) {
+  asio::steady_timer timer(co_await this_coro::executor);
+  timer.expires_after(duration);
+  co_await timer.async_wait(use_nothrow_awaitable);
+}
 
 template <typename Queue>
 awaitable<void> health_check(std::string_view site, Queue &queue,
@@ -43,36 +43,54 @@ awaitable<void> health_check(std::string_view site, Queue &queue,
   const size_t MAX_HEADER_SIZE = 8192;
   response.reserve(MAX_HEADER_SIZE);
 
-  asio::steady_timer timer(ex);
+  auto [resolver_err, resolver_res] = co_await resolver.async_resolve(
+      site, "80", tcp::resolver::numeric_service, use_nothrow_awaitable);
 
-  auto resolver_res = co_await resolver.async_resolve(
-      site, "80", tcp::resolver::numeric_service, use_awaitable);
+  auto con_tuple = co_await (
+      asio::async_connect(socket, resolver_res, use_nothrow_awaitable) ||
+      timeout(std::chrono::seconds(3)));
 
-  timer.expires_after(std::chrono::seconds(3));
-  auto connection_res =
-      co_await (asio::async_connect(socket, resolver_res, use_awaitable) ||
-                timer.async_wait(use_awaitable));
-  if (connection_res.index() == 1) {
+  // timed out
+  if (con_tuple.index() == 1) {
+    socket.close();
+    queue.enqueue(make_log_entry(site, "Conection to socket timed out"));
+    co_return;
+  }
+
+  auto [con_err, con_res] = std::get<0>(con_tuple);
+  if (con_err) {
     socket.close();
     queue.enqueue(make_log_entry(site, "Conection to socket error"));
     co_return;
   }
-  timer.cancel();
 
-  co_await asio::async_write(socket, buffer(request), use_awaitable);
+  auto [write_err, write_res] = co_await asio::async_write(
+      socket, buffer(request), use_nothrow_awaitable);
+  if (write_err) {
+    socket.close();
+    queue.enqueue(make_log_entry(site, "Write to socket error"));
+    co_return;
+  }
 
-  timer.expires_after(std::chrono::seconds(5));
-  auto read_res =
+  auto read_tuple =
       co_await (asio::async_read_until(
                     socket, asio::dynamic_buffer(response, MAX_HEADER_SIZE),
-                    "\r\n\r\n", use_awaitable) ||
-                timer.async_wait(use_awaitable));
-  if (read_res.index() == 1) {
+                    "\r\n\r\n", use_nothrow_awaitable) ||
+                timeout(std::chrono::seconds(5)));
+
+  // timed out
+  if (read_tuple.index() == 1) {
+    socket.close();
+    queue.enqueue(make_log_entry(site, "Read from socket timed out"));
+    co_return;
+  };
+
+  auto [read_err, read_res] = std::get<0>(read_tuple);
+  if (read_err) {
     socket.close();
     queue.enqueue(make_log_entry(site, "Read from socket error"));
     co_return;
-  };
-  timer.cancel();
+  }
 
   queue.enqueue(make_log_entry(site, response));
   socket.close();
@@ -87,7 +105,7 @@ void health_results_writer(Queue &queue, std::atomic<int> &active_coro) {
   while (true) {
     std::string res;
     if (queue.wait_dequeue_timed(res, std::chrono::milliseconds(200))) {
-      log << res << '\n';
+      log << res << std::endl;
       continue;
     }
     if (active_coro == 0 && queue.size_approx() == 0)
