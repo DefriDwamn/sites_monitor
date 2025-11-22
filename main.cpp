@@ -16,7 +16,6 @@ using asio::buffer;
 using asio::co_spawn;
 using asio::detached;
 using asio::ip::tcp;
-using boost::system::error_code;
 using std::chrono::steady_clock;
 constexpr auto use_nothrow_awaitable = asio::as_tuple(asio::use_awaitable);
 
